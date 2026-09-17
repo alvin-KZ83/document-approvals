@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Document Approvals</title>
+<style>
+  :root{
+    --bg:#F4F5FA; --surface:#FFFFFF; --ink:#1E2233; --ink-soft:#6B7086; --line:#E6E7F0;
+    --primary:#5B5FEF; --primary-soft:#EEEFFE;
+    --approved:#2FA36B; --rejected:#D64545; --pending:#E2A73E;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; font-size:15px; line-height:1.5;}
+  .wrap{max-width:640px; margin:0 auto; padding:24px 20px 60px;}
+  header{display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; flex-wrap:wrap; gap:10px;}
+  header h1{font-size:19px; margin:0;}
+  .who{font-size:13px; color:var(--ink-soft);}
+  .badges{display:flex; gap:6px; margin-top:4px;}
+  .badge{font-size:11px; border:1px solid var(--line); border-radius:20px; padding:2px 8px; color:var(--ink-soft);}
+  .badge.on{color:var(--primary); border-color:var(--primary);}
+  button{font:inherit; cursor:pointer;}
+  .btn{background:var(--primary); color:#fff; border:1px solid var(--primary); border-radius:8px; padding:9px 16px; font-weight:600;}
+  .btn.secondary{background:transparent; color:var(--primary);}
+  .btn.approve{background:var(--approved); border-color:var(--approved);}
+  .btn.reject{background:var(--rejected); border-color:var(--rejected);}
+  .btn.small{padding:6px 12px; font-size:13px;}
+  .card{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:18px;}
+  .card h2{font-size:15px; margin:0 0 12px;}
+  label{display:block; font-size:12.5px; color:var(--ink-soft); margin:0 0 5px; font-weight:600;}
+  input, select{width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:#FAFAFE; color:var(--ink); font:inherit; margin-bottom:14px;}
+  .row{display:flex; gap:6px;}
+  .row input{margin-bottom:0;}
+  .item{display:flex; align-items:center; gap:10px; padding:10px 0; border-top:1px solid var(--line); font-size:13.5px;}
+  .item:first-of-type{border-top:none;}
+  .item .meta{flex:1;}
+  .item .meta .t{font-weight:600;}
+  .item .meta .s{color:var(--ink-soft); font-size:12px;}
+  .tag{font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px;}
+  .tag.pending{color:var(--pending); background:#FBF1DF;}
+  .tag.approved{color:var(--approved); background:#E3F3EA;}
+  .tag.rejected{color:var(--rejected); background:#FBE7E7;}
+  .empty{color:var(--ink-soft); font-size:13.5px; padding:8px 0;}
+  .error{color:var(--rejected); font-size:13px; margin:-6px 0 14px;}
+  .hint{font-size:12px; color:var(--ink-soft); margin:-8px 0 14px;}
+  .status-line{font-size:13px; color:var(--ink-soft); min-height:18px;}
+</style>
+</head>
+<body>
+<div class="wrap" id="app">Loading…</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+import {
+  getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+import {
+  getFirestore, doc, getDoc, collection, getDocs, addDoc, updateDoc, query, where,
+  serverTimestamp, orderBy
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+import {
+  getStorage, ref as storageRef, uploadBytes, getBytes
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-storage.js";
+import { firebaseConfig } from "./firebase-config.js";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const storage = getStorage(app);
+
+let currentUser = null;
+let profile = null;          // { name, perm }
+let approvers = [];          // directory entries with approve bit set
+let myUploads = [];
+let pendingApprovals = [];
+let decidedByMe = [];
+let loginError = '';
+let statusLine = '';
+
+const el = document.getElementById('app');
+
+onAuthStateChanged(auth, async user => {
+  currentUser = user;
+  if(user){
+    await loadProfile();
+  } else {
+    profile = null;
+    render();
+  }
+});
+
+async function loadProfile(){
+  const snap = await getDoc(doc(db, 'users', currentUser.uid));
+  if(!snap.exists()){
+    loginError = "Your account isn't set up yet. Ask your admin to add you to the directory.";
+    await signOut(auth);
+    return;
+  }
+  profile = snap.data(); // {name, perm}
+  loginError = '';
+  await Promise.all([loadDirectory(), loadMyUploads(), loadPendingApprovals(), loadDecidedByMe()]);
+  render();
+}
+
+async function loadDirectory(){
+  const snap = await getDocs(collection(db, 'users'));
+  approvers = snap.docs
+    .map(d => ({ uid: d.id, ...d.data() }))
+    .filter(u => u.perm && u.perm[1] === '1' && u.uid !== currentUser.uid);
+}
+
+async function loadMyUploads(){
+  if(!canUpload()) { myUploads = []; return; }
+  const q = query(collection(db, 'documents'), where('uploadedByUid', '==', currentUser.uid), orderBy('createdAt', 'desc'));
+  const snap = await getDocs(q);
+  myUploads = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+async function loadPendingApprovals(){
+  if(!canApprove()) { pendingApprovals = []; return; }
+  const q = query(collection(db, 'documents'), where('approverUid', '==', currentUser.uid), where('status', '==', 'pending'));
+  const snap = await getDocs(q);
+  pendingApprovals = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+async function loadDecidedByMe(){
+  if(!canApprove()) { decidedByMe = []; return; }
+  const q = query(collection(db, 'documents'), where('approverUid', '==', currentUser.uid), where('status', 'in', ['approved','rejected']));
+  const snap = await getDocs(q);
+  decidedByMe = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+function canUpload(){ return !!profile && profile.perm && profile.perm[0] === '1'; }
+function canApprove(){ return !!profile && profile.perm && profile.perm[1] === '1'; }
+
+/* ---------------- Crypto (AES-GCM, passphrase via PBKDF2) ---------------- */
+function b64(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))); }
+function unb64(str){ return Uint8Array.from(atob(str), c => c.charCodeAt(0)); }
+
+async function deriveKey(passphrase, saltBytes){
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(passphrase), { name: 'PBKDF2' }, false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: saltBytes, iterations: 150000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function encryptFile(file, passphrase){
+  const plain = await file.arrayBuffer();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(passphrase, salt);
+  const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain);
+  return { cipher, saltB64: b64(salt), ivB64: b64(iv) };
+}
+
+async function decryptBytes(cipherBuf, passphrase, saltB64, ivB64){
+  const salt = unb64(saltB64), iv = unb64(ivB64);
+  const key = await deriveKey(passphrase, salt);
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipherBuf); // throws on wrong passphrase
+}
+
+/* ---------------- Actions ---------------- */
+async function doLogin(email, password){
+  loginError = '';
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+  } catch(err){
+    loginError = 'Could not sign in. Check the email and password.';
+    render();
+  }
+}
+
+async function doLogout(){ await signOut(auth); }
+
+async function handleUpload(e){
+  e.preventDefault();
+  const fileInput = document.getElementById('u-file');
+  const file = fileInput.files[0];
+  const title = document.getElementById('u-title').value.trim();
+  const approverUid = document.getElementById('u-approver').value;
+  const pass = document.getElementById('u-pass').value;
+
+  if(!file || file.type !== 'application/pdf'){ alert('Choose a PDF file.'); return; }
+  if(!approverUid){ alert('Choose who should approve this.'); return; }
+  if(!pass){ alert('Set a passphrase — share it with the approver separately (not over email with the file).'); return; }
+
+  statusLine = 'Encrypting…'; render();
+  const { cipher, saltB64, ivB64 } = await encryptFile(file, pass);
+
+  statusLine = 'Uploading…'; render();
+  const path = `docs/${crypto.randomUUID()}.enc`;
+  await uploadBytes(storageRef(storage, path), new Uint8Array(cipher));
+
+  const approver = approvers.find(a => a.uid === approverUid);
+  await addDoc(collection(db, 'documents'), {
+    title: title || file.name,
+    fileName: file.name,
+    sizeKB: Math.max(1, Math.round(file.size / 1024)),
+    uploadedByUid: currentUser.uid,
+    uploadedByName: profile.name,
+    approverUid,
+    approverName: approver ? approver.name : '',
+    status: 'pending',
+    storagePath: path,
+    saltB64, ivB64,
+    createdAt: serverTimestamp(),
+  });
+
+  statusLine = 'Sent for approval.';
+  e.target.reset();
+  await loadMyUploads();
+  render();
+}
+
+async function decide(docId, result){
+  const comment = window.prompt(result === 'rejected' ? 'Note for the uploader (required):' : 'Optional note:') || '';
+  if(result === 'rejected' && !comment){ alert('A note is required when rejecting.'); return; }
+  await updateDoc(doc(db, 'documents', docId), { status: result, comment, decidedAt: serverTimestamp() });
+  await Promise.all([loadPendingApprovals(), loadDecidedByMe()]);
+  render();
+}
+
+async function viewDocument(docId, meta){
+  const pass = window.prompt('Enter the document passphrase to view it:');
+  if(!pass) return;
+  try {
+    const bytes = await getBytes(storageRef(storage, meta.storagePath));
+    const plain = await decryptBytes(bytes, pass, meta.saltB64, meta.ivB64);
+    const blob = new Blob([plain], { type: 'application/pdf' });
+    window.open(URL.createObjectURL(blob), '_blank');
+  } catch(err){
+    alert('Wrong passphrase, or the file could not be decrypted.');
+  }
+}
+
+/* ---------------- Rendering ---------------- */
+function render(){
+  if(!currentUser){
+    el.innerHTML = `
+      <div class="wrap">
+        <header><h1>Document Approvals</h1></header>
+        <div class="card">
+          <h2>Sign in</h2>
+          ${loginError ? `<div class="error">${loginError}</div>` : ''}
+          <form id="loginForm">
+            <label for="l-email">Email</label>
+            <input type="email" id="l-email" required autocomplete="username">
+            <label for="l-pass">Password</label>
+            <input type="password" id="l-pass" required autocomplete="current-password">
+            <button class="btn" type="submit">Sign in</button>
+          </form>
+        </div>
+      </div>
+    `;
+    document.getElementById('loginForm').onsubmit = e => {
+      e.preventDefault();
+      doLogin(document.getElementById('l-email').value.trim(), document.getElementById('l-pass').value);
+    };
+    return;
+  }
+
+  if(!profile){ el.innerHTML = `<div class="wrap">Loading your account…</div>`; return; }
+
+  const upload = canUpload(), approve = canApprove();
+
+  el.innerHTML = `
+    <div class="wrap">
+      <header>
+        <div>
+          <h1>Document Approvals</h1>
+          <div class="who">${profile.name} · ${currentUser.email}</div>
+          <div class="badges">
+            <span class="badge ${upload?'on':''}">Upload</span>
+            <span class="badge ${approve?'on':''}">Approve</span>
+          </div>
+        </div>
+        <button class="btn secondary small" id="logoutBtn">Sign out</button>
+      </header>
+
+      ${upload ? renderUploadCard() : ''}
+      ${upload ? renderMyUploadsCard() : ''}
+      ${approve ? renderPendingCard() : ''}
+      ${approve ? renderDecidedCard() : ''}
+      ${!upload && !approve ? `<div class="card"><div class="empty">Your account doesn't have upload or approve access yet. Contact your admin.</div></div>` : ''}
+    </div>
+  `;
+
+  const logoutBtn = document.getElementById('logoutBtn');
+  if(logoutBtn) logoutBtn.onclick = doLogout;
+
+  const uploadForm = document.getElementById('uploadForm');
+  if(uploadForm) uploadForm.onsubmit = handleUpload;
+
+  document.querySelectorAll('[data-view]').forEach(b => b.onclick = () => {
+    const id = b.getAttribute('data-view');
+    const item = [...pendingApprovals, ...decidedByMe, ...myUploads].find(x => x.id === id);
+    if(item) viewDocument(id, item);
+  });
+  document.querySelectorAll('[data-approve]').forEach(b => b.onclick = () => decide(b.getAttribute('data-approve'), 'approved'));
+  document.querySelectorAll('[data-reject]').forEach(b => b.onclick = () => decide(b.getAttribute('data-reject'), 'rejected'));
+}
+
+function renderUploadCard(){
+  return `
+    <div class="card">
+      <h2>Upload a document</h2>
+      <form id="uploadForm">
+        <label for="u-title">Title</label>
+        <input type="text" id="u-title" placeholder="e.g. Client contract — Acme Corp">
+        <label for="u-file">PDF file</label>
+        <input type="file" id="u-file" accept="application/pdf" required>
+        <label for="u-approver">Approver</label>
+        <select id="u-approver" required>
+          <option value="">Choose an approver</option>
+          ${approvers.map(a => `<option value="${a.uid}">${a.name}</option>`).join('')}
+        </select>
+        <label for="u-pass">Passphrase</label>
+        <input type="password" id="u-pass" required placeholder="Share this with the approver separately">
+        <div class="hint">The file is encrypted in your browser before it ever leaves your device. Send the passphrase to your approver a different way than you send the file — a text message or a call, not the same email thread.</div>
+        <button class="btn" type="submit">Encrypt &amp; send for approval</button>
+      </form>
+      <div class="status-line">${statusLine}</div>
+    </div>
+  `;
+}
+
+function renderMyUploadsCard(){
+  return `
+    <div class="card">
+      <h2>My uploads</h2>
+      ${myUploads.length ? myUploads.map(d => `
+        <div class="item">
+          <div class="meta"><div class="t">${escapeHtml(d.title)}</div><div class="s">to ${escapeHtml(d.approverName)}${d.comment ? ` — “${escapeHtml(d.comment)}”` : ''}</div></div>
+          <span class="tag ${d.status}">${d.status}</span>
+        </div>
+      `).join('') : `<div class="empty">Nothing uploaded yet.</div>`}
+    </div>
+  `;
+}
+
+function renderPendingCard(){
+  return `
+    <div class="card">
+      <h2>Waiting on you</h2>
+      ${pendingApprovals.length ? pendingApprovals.map(d => `
+        <div class="item">
+          <div class="meta"><div class="t">${escapeHtml(d.title)}</div><div class="s">from ${escapeHtml(d.uploadedByName)} · ${d.sizeKB} KB</div></div>
+          <button class="btn secondary small" data-view="${d.id}">View</button>
+          <button class="btn approve small" data-approve="${d.id}">Approve</button>
+          <button class="btn reject small" data-reject="${d.id}">Reject</button>
+        </div>
+      `).join('') : `<div class="empty">Nothing needs your review right now.</div>`}
+    </div>
+  `;
+}
+
+function renderDecidedCard(){
+  return `
+    <div class="card">
+      <h2>Your past decisions</h2>
+      ${decidedByMe.length ? decidedByMe.map(d => `
+        <div class="item">
+          <div class="meta"><div class="t">${escapeHtml(d.title)}</div><div class="s">from ${escapeHtml(d.uploadedByName)}</div></div>
+          <span class="tag ${d.status}">${d.status}</span>
+        </div>
+      `).join('') : `<div class="empty">No decisions yet.</div>`}
+    </div>
+  `;
+}
+
+function escapeHtml(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+render();
+</script>
+</body>
+</html>

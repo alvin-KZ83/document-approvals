@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // The user directory. Only readable by signed-in users (so the upload form
+    // can list approvers). Writes are blocked entirely — you manage this
+    // collection yourself from the Firebase console, which is what makes it
+    // "only I can edit": nobody can add or modify a user from the app itself.
+    match /users/{uid} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Document-approval records (metadata only — the encrypted file itself
+    // lives in Storage, never here).
+    match /documents/{docId} {
+      // Anyone signed in can create a request, but only if they're marking
+      // themselves as the uploader and their directory entry has the upload bit set.
+      allow create: if request.auth != null
+        && request.resource.data.uploadedByUid == request.auth.uid
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.perm in ['11', '10'];
+
+      // Only the uploader or the assigned approver can read a given request.
+      allow read: if request.auth != null
+        && (resource.data.uploadedByUid == request.auth.uid
+            || resource.data.approverUid == request.auth.uid);
+
+      // Only the assigned approver can update it (to record their decision),
+      // and only if their directory entry has the approve bit set.
+      allow update: if request.auth != null
+        && resource.data.approverUid == request.auth.uid
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.perm in ['11', '01'];
+
+      allow delete: if false;
+    }
+  }
+}
