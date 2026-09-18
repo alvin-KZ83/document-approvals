@@ -193,14 +193,26 @@ async function handleUpload(e){
 
   if(!file || file.type !== 'application/pdf'){ alert('Choose a PDF file.'); return; }
   if(!approverUid){ alert('Choose who should approve this.'); return; }
-  if(!pass){ alert('Set a passphrase — share it with the approver separately (not over email with the file).'); return; }
 
-  statusLine = 'Encrypting…'; render();
-  const { cipher, saltB64, ivB64 } = await encryptFile(file, pass);
+  const encrypted = !!pass;
+  let bytesToUpload, saltB64 = null, ivB64 = null;
+
+  if(encrypted){
+    statusLine = 'Encrypting…'; render();
+    const enc = await encryptFile(file, pass);
+    bytesToUpload = new Uint8Array(enc.cipher);
+    saltB64 = enc.saltB64; ivB64 = enc.ivB64;
+  } else {
+    bytesToUpload = new Uint8Array(await file.arrayBuffer());
+  }
 
   statusLine = 'Uploading…'; render();
-  const path = `docs/${crypto.randomUUID()}.enc`;
-  await uploadBytes(storageRef(storage, path), new Uint8Array(cipher));
+  const path = `docs/${crypto.randomUUID()}${encrypted ? '.enc' : '.pdf'}`;
+  // uploadedByUid/approverUid go on as custom metadata so storage.rules can gate
+  // read access even when the file isn't encrypted (see storage.rules comment).
+  await uploadBytes(storageRef(storage, path), bytesToUpload, {
+    customMetadata: { uploadedByUid: currentUser.uid, approverUid }
+  });
 
   const approver = approvers.find(a => a.uid === approverUid);
   await addDoc(collection(db, 'documents'), {
@@ -213,11 +225,12 @@ async function handleUpload(e){
     approverName: approver ? approver.name : '',
     status: 'pending',
     storagePath: path,
+    encrypted,
     saltB64, ivB64,
     createdAt: serverTimestamp(),
   });
 
-  statusLine = 'Sent for approval.';
+  statusLine = encrypted ? 'Sent for approval.' : 'Sent for approval (unencrypted).';
   e.target.reset();
   await loadMyUploads();
   render();
@@ -232,16 +245,94 @@ async function decide(docId, result){
 }
 
 async function viewDocument(docId, meta){
-  const pass = window.prompt('Enter the document passphrase to view it:');
-  if(!pass) return;
+  let pass = null;
+  if(meta.encrypted){
+    pass = window.prompt('Enter the document passphrase to view it:');
+    if(!pass) return;
+  }
   try {
     const bytes = await getBytes(storageRef(storage, meta.storagePath));
-    const plain = await decryptBytes(bytes, pass, meta.saltB64, meta.ivB64);
+    const plain = meta.encrypted ? await decryptBytes(bytes, pass, meta.saltB64, meta.ivB64) : bytes;
     const blob = new Blob([plain], { type: 'application/pdf' });
     window.open(URL.createObjectURL(blob), '_blank');
   } catch(err){
-    alert('Wrong passphrase, or the file could not be decrypted.');
+    alert(meta.encrypted ? 'Wrong passphrase, or the file could not be decrypted.' : 'Could not open the file.');
   }
+}
+
+/* ---------------- Approval certificate (printable proof) ---------------- */
+// Pre-uploaded signature images live at signatures/{uid}.png, dropped in by
+// the admin via the console — there's no upload UI for these. A user with no
+// file there yet is a normal, expected case, not an error: fall back to null
+// so the certificate just renders a blank line for them, same as before.
+async function fetchSignatureDataUrl(uid){
+  if(!uid) return null;
+  try {
+    const bytes = await getBytes(storageRef(storage, `signatures/${uid}.png`));
+    return `data:image/png;base64,${b64(bytes)}`;
+  } catch(err){
+    return null;
+  }
+}
+
+async function showCertificate(docId){
+  const item = [...myUploads, ...decidedByMe].find(x => x.id === docId);
+  if(!item || item.status !== 'approved') return;
+
+  const approvedDate = item.decidedAt && typeof item.decidedAt.toDate === 'function'
+    ? item.decidedAt.toDate().toLocaleString() : '—';
+
+  // Built via DOM APIs rather than a document.write() string: a raw string
+  // containing a literal closing-body tag is exactly what a dev-reload tool
+  // like Live Server naively string-matches to splice its own <script> into —
+  // right in the middle of *our* module script if that string sits in this
+  // file. Assigning to the popup's own head/body sidesteps that entirely.
+  // Sized for a half-Quarto sheet (203mm x 127mm, i.e. Quarto cut across the
+  // shorter way) since that's what gets handed to an on-site superior; kept
+  // deliberately sparse for a glance-and-done read.
+  const style = `
+    body{font-family:Arial,Helvetica,system-ui,sans-serif; background:#EDEEF3; margin:0; padding:28px 20px; color:#161821;}
+    .sheet{max-width:460px; margin:0 auto; background:#fff; padding:30px 34px;}
+    .org{font-size:10.5px; font-weight:700; letter-spacing:1.8px; text-transform:uppercase; color:#6B6E80;}
+    .doctype{font-size:10.5px; color:#9195A8; margin-top:1px;}
+    .title-row{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:18px 0 18px;}
+    h1{font-size:17px; margin:0; font-weight:700; line-height:1.3;}
+    .status-pill{font-size:10px; font-weight:800; letter-spacing:.5px; padding:2px 8px; background:#FCEE7A; color:#3A3D4D; white-space:nowrap;}
+    .meta div{font-size:13.5px; line-height:2;}
+    .meta .label{display:inline-block; width:100px; color:#6B6E80;}
+    .meta .value{font-weight:600;}
+    .actions{max-width:460px; margin:16px auto 0; text-align:center;}
+    .actions button{font:inherit; font-size:13px; padding:8px 18px; background:#5B5FEF; color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;}
+    @page{ size: 203mm 127mm; margin: 8mm; }
+    @media print{ body{background:#fff; padding:0;} .actions{display:none;} }
+  `;
+  const bodyHtml = `
+    <div class="sheet">
+      <div class="org">DOCUMENT APPROVALS</div>
+      <div class="doctype">Approval Certificate</div>
+
+      <div class="title-row">
+        <h1>${escapeHtml(item.title)}</h1>
+        <span class="status-pill">APPROVED</span>
+      </div>
+
+      <div class="meta">
+        <div><span class="label">Submitted by</span><span class="value">${escapeHtml(item.uploadedByName)}</span></div>
+        <div><span class="label">Approved by</span><span class="value">${escapeHtml(item.approverName)}</span></div>
+        <div><span class="label">Approved on</span><span class="value">${escapeHtml(approvedDate)}</span></div>
+      </div>
+    </div>
+    <div class="actions"><button type="button" id="certPrintBtn">Print / Save as PDF</button></div>
+  `;
+
+  const w = window.open('', '_blank');
+  if(!w){ alert('Please allow pop-ups to view the certificate.'); return; }
+  w.document.title = `Certificate of Approval — ${item.title}`;
+  const styleEl = w.document.createElement('style');
+  styleEl.textContent = style;
+  w.document.head.appendChild(styleEl);
+  w.document.body.innerHTML = bodyHtml;
+  w.document.getElementById('certPrintBtn').onclick = () => w.print();
 }
 
 /* ---------------- Rendering ---------------- */
@@ -309,6 +400,7 @@ function render(){
   });
   document.querySelectorAll('[data-approve]').forEach(b => b.onclick = () => decide(b.getAttribute('data-approve'), 'approved'));
   document.querySelectorAll('[data-reject]').forEach(b => b.onclick = () => decide(b.getAttribute('data-reject'), 'rejected'));
+  document.querySelectorAll('[data-cert]').forEach(b => b.onclick = () => showCertificate(b.getAttribute('data-cert')));
 }
 
 function renderUploadCard(){
@@ -325,10 +417,10 @@ function renderUploadCard(){
           <option value="">Choose an approver</option>
           ${approvers.map(a => `<option value="${a.uid}">${a.name}</option>`).join('')}
         </select>
-        <label for="u-pass">Passphrase</label>
-        <input type="password" id="u-pass" required placeholder="Share this with the approver separately">
-        <div class="hint">The file is encrypted in your browser before it ever leaves your device. Send the passphrase to your approver a different way than you send the file — a text message or a call, not the same email thread.</div>
-        <button class="btn" type="submit">Encrypt &amp; send for approval</button>
+        <label for="u-pass">Passphrase (optional)</label>
+        <input type="password" id="u-pass" placeholder="Leave blank to send unencrypted">
+        <div class="hint">Set a passphrase to encrypt the file in your browser before it leaves your device — then send the passphrase to your approver a different way than the file (a text message or a call, not the same email thread). Leave it blank to send the file without encryption.</div>
+        <button class="btn" type="submit">Send for approval</button>
       </form>
       <div class="status-line">${statusLine}</div>
     </div>
@@ -343,6 +435,7 @@ function renderMyUploadsCard(){
         <div class="item">
           <div class="meta"><div class="t">${escapeHtml(d.title)}</div><div class="s">to ${escapeHtml(d.approverName)}${d.comment ? ` — “${escapeHtml(d.comment)}”` : ''}</div></div>
           <span class="tag ${d.status}">${d.status}</span>
+          ${d.status === 'approved' ? `<button class="btn secondary small" data-cert="${d.id}">Certificate</button>` : ''}
         </div>
       `).join('') : `<div class="empty">Nothing uploaded yet.</div>`}
     </div>
@@ -373,6 +466,7 @@ function renderDecidedCard(){
         <div class="item">
           <div class="meta"><div class="t">${escapeHtml(d.title)}</div><div class="s">from ${escapeHtml(d.uploadedByName)}</div></div>
           <span class="tag ${d.status}">${d.status}</span>
+          ${d.status === 'approved' ? `<button class="btn secondary small" data-cert="${d.id}">Certificate</button>` : ''}
         </div>
       `).join('') : `<div class="empty">No decisions yet.</div>`}
     </div>
