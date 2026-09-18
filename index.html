@@ -56,7 +56,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, collection, getDocs, addDoc, updateDoc, query, where,
-  serverTimestamp, orderBy
+  serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 import {
   getStorage, ref as storageRef, uploadBytes, getBytes
@@ -109,11 +109,17 @@ async function loadDirectory(){
     .filter(u => u.perm && u.perm[1] === '1' && u.uid !== currentUser.uid);
 }
 
+// Firestore Timestamp -> ms. A doc written this session may still have a null
+// createdAt if serverTimestamp() hasn't resolved; sort those to the top.
+function millis(ts){ return ts && typeof ts.toMillis === 'function' ? ts.toMillis() : Infinity; }
+
 async function loadMyUploads(){
   if(!canUpload()) { myUploads = []; return; }
-  const q = query(collection(db, 'documents'), where('uploadedByUid', '==', currentUser.uid), orderBy('createdAt', 'desc'));
+  const q = query(collection(db, 'documents'), where('uploadedByUid', '==', currentUser.uid));
   const snap = await getDocs(q);
-  myUploads = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  myUploads = snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => millis(b.createdAt) - millis(a.createdAt));
 }
 
 async function loadPendingApprovals(){
