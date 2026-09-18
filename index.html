@@ -36,7 +36,7 @@
   .item .meta{flex:1;}
   .item .meta .t{font-weight:600;}
   .item .meta .s{color:var(--ink-soft); font-size:12px;}
-  .tag{font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px;}
+  .tag{font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px; text-transform:capitalize;}
   .tag.pending{color:var(--pending); background:#FBF1DF;}
   .tag.approved{color:var(--approved); background:#E3F3EA;}
   .tag.rejected{color:var(--rejected); background:#FBE7E7;}
@@ -131,7 +131,7 @@ async function loadPendingApprovals(){
 
 async function loadDecidedByMe(){
   if(!canApprove()) { decidedByMe = []; return; }
-  const q = query(collection(db, 'documents'), where('approverUid', '==', currentUser.uid), where('status', 'in', ['Approved','rejected']));
+  const q = query(collection(db, 'documents'), where('approverUid', '==', currentUser.uid), where('status', 'in', ['approved','rejected']));
   const snap = await getDocs(q);
   decidedByMe = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
@@ -311,7 +311,7 @@ async function fetchSignatureDataUrl(uid){
 
 async function showCertificate(docId){
   const item = [...myUploads, ...decidedByMe].find(x => x.id === docId);
-  if(!item || item.status !== 'Approved') return;
+  if(!item || item.status !== 'approved') return;
 
   const approvedDate = item.decidedAt && typeof item.decidedAt.toDate === 'function'
     ? item.decidedAt.toDate().toLocaleString() : '—';
@@ -432,7 +432,7 @@ function render(){
     const item = [...pendingApprovals, ...decidedByMe, ...myUploads].find(x => x.id === id);
     if(item) viewDocument(id, item);
   });
-  document.querySelectorAll('[data-approve]').forEach(b => b.onclick = () => decide(b.getAttribute('data-approve'), 'Approved'));
+  document.querySelectorAll('[data-approve]').forEach(b => b.onclick = () => decide(b.getAttribute('data-approve'), 'approved'));
   document.querySelectorAll('[data-reject]').forEach(b => b.onclick = () => decide(b.getAttribute('data-reject'), 'rejected'));
   document.querySelectorAll('[data-cert]').forEach(b => b.onclick = () => showCertificate(b.getAttribute('data-cert')));
 }
@@ -469,7 +469,7 @@ function renderMyUploadsCard(){
         <div class="item">
           <div class="meta"><div class="t">${escapeHtml(d.title)}</div><div class="s">to ${escapeHtml(d.approverName)}${d.comment ? ` — “${escapeHtml(d.comment)}”` : ''}</div></div>
           <span class="tag ${d.status}">${d.status}</span>
-          ${d.status === 'Approved' ? `<button class="btn secondary small" data-cert="${d.id}">Certificate</button>` : ''}
+          ${d.status === 'approved' ? `<button class="btn secondary small" data-cert="${d.id}">Certificate</button>` : ''}
         </div>
       `).join('') : `<div class="empty">Nothing uploaded yet.</div>`}
     </div>
@@ -500,7 +500,7 @@ function renderDecidedCard(){
         <div class="item">
           <div class="meta"><div class="t">${escapeHtml(d.title)}</div><div class="s">from ${escapeHtml(d.uploadedByName)}</div></div>
           <span class="tag ${d.status}">${d.status}</span>
-          ${d.status === 'Approved' ? `<button class="btn secondary small" data-cert="${d.id}">Certificate</button>` : ''}
+          ${d.status === 'approved' ? `<button class="btn secondary small" data-cert="${d.id}">Certificate</button>` : ''}
         </div>
       `).join('') : `<div class="empty">No decisions yet.</div>`}
     </div>
