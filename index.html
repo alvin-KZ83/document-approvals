@@ -254,10 +254,44 @@ async function viewDocument(docId, meta){
     const bytes = await getBytes(storageRef(storage, meta.storagePath));
     const plain = meta.encrypted ? await decryptBytes(bytes, pass, meta.saltB64, meta.ivB64) : bytes;
     const blob = new Blob([plain], { type: 'application/pdf' });
-    window.open(URL.createObjectURL(blob), '_blank');
+    openPdfViewer(meta.title || meta.fileName, URL.createObjectURL(blob));
   } catch(err){
     alert(meta.encrypted ? 'Wrong passphrase, or the file could not be decrypted.' : 'Could not open the file.');
   }
+}
+
+// Two independent <iframe>s pointing at the same blob URL, side by side —
+// each gets the browser's normal PDF viewer with its own scroll/zoom/page
+// position, so a reviewer can park one half on page 1 and scroll the other
+// to page 12 to compare. On a narrow (mobile-sized) window the right pane
+// hides itself via CSS and the left pane just fills the window as before.
+function openPdfViewer(title, url){
+  const w = window.open('', '_blank');
+  if(!w){ alert('Please allow pop-ups to view the document.'); return; }
+  w.document.title = title || 'Document';
+  const style = w.document.createElement('style');
+  style.textContent = `
+    html, body{height:100%; margin:0;}
+    body{font-family:system-ui,-apple-system,sans-serif; background:#1E2233;}
+    .bar{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 16px; background:#2A2E42; color:#fff; font-size:13px;}
+    .bar .hint{color:#B7BAD1; font-size:11.5px;}
+    .panes{display:flex; height:calc(100% - 37px);}
+    .pane{flex:1; min-width:0;}
+    .pane iframe{display:block; width:100%; height:100%; border:0;}
+    .pane.right{border-left:2px solid #1E2233;}
+    @media (max-width: 860px){
+      .pane.right{display:none;}
+      .bar .hint{display:none;}
+    }
+  `;
+  w.document.head.appendChild(style);
+  w.document.body.innerHTML = `
+    <div class="bar"><strong>${escapeHtml(title || 'Document')}</strong><span class="hint">Side-by-side view — each half scrolls independently</span></div>
+    <div class="panes">
+      <div class="pane left"><iframe src="${url}"></iframe></div>
+      <div class="pane right"><iframe src="${url}"></iframe></div>
+    </div>
+  `;
 }
 
 /* ---------------- Approval certificate (printable proof) ---------------- */
